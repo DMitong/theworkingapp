@@ -1,0 +1,13 @@
+Deployment JSON files are generated here by `forge script script/Deploy.s.sol`.
+The file is named {chainId}.json (e.g. 8453.json for Base mainnet).
+
+Example output:
+{
+  "chainId": 8453,
+  "PlatformFactory": "0x...",
+  "PlatformNFTRegistry": "0x..."
+}
+
+These addresses are read by:
+- backend/.env (PLATFORM_FACTORY_ADDRESS, PLATFORM_NFT_REGISTRY_ADDRESS)
+- frontend/.env (if direct contract reads are needed)

@@ -1,0 +1,357 @@
+// The Working App — Prisma Schema
+// Run: npx prisma migrate dev --name init
+// Run: npx prisma generate
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ─────────────────────────────────────────────────────
+
+enum UserMode {
+  STANDARD
+  CRYPTO_NATIVE
+}
+
+enum ProjectState {
+  PROPOSED
+  COUNCIL_REVIEW
+  TENDERING
+  AWARDED
+  ACTIVE
+  MILESTONE_UNDER_REVIEW
+  MILESTONE_PAID
+  COMPLETION_VOTE
+  COMPLETED
+  DISPUTED
+  EXPIRED
+  CLOSED
+}
+
+enum MilestoneState {
+  PENDING
+  UNDER_REVIEW
+  PAID
+  REJECTED
+}
+
+enum MilestoneVerificationType {
+  COUNCIL_ONLY
+  COUNCIL_MEMBER_QUORUM
+  FULL_COMMUNITY_VOTE
+}
+
+enum VisibilityMode {
+  COMMUNITY_INTERNAL
+  PLATFORM_PUBLIC
+  COMMUNITY_TARGETED
+  DUAL_PUBLICITY
+  MULTI_COMMUNITY_TARGETED
+}
+
+enum MemberRole {
+  MEMBER
+  COUNCIL
+}
+
+enum MembershipVerificationMode {
+  OPEN
+  INVITE_CODE
+  ADDRESS_PROOF
+  DOMAIN_EMAIL
+  ZK_KYC_REQUIRED
+  DOCUMENT_REVIEW
+  NFT_GATED
+  CUSTOM
+}
+
+enum CommunityType {
+  RESIDENTIAL
+  CIVIC
+  PROFESSIONAL
+  ALUMNI
+  RELIGIOUS
+  SOCIAL
+  INDUSTRY
+  OTHER
+}
+
+enum VoteChoice {
+  COMPLETED
+  PARTIAL
+  NOT_SATISFACTORY
+  DISPUTE
+}
+
+// ── Models ────────────────────────────────────────────────────
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  passwordHash     String
+  handle           String    @unique
+  mode             UserMode  @default(STANDARD)
+  walletAddress    String    @unique  // Platform-managed embedded wallet
+  externalWallet   String?            // Connected external wallet (Crypto-Native)
+  tokenId          Int?               // Platform NFT token ID (set after mint confirms)
+  isKycVerified    Boolean   @default(false)
+  kycVerifiedAt    DateTime?
+  isEmailVerified  Boolean   @default(false)
+  emailVerifiedAt  DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  // Relations
+  memberships      Membership[]
+  proposals        Project[]       @relation("Proposer")
+  bids             Bid[]
+  bounties         Bounty[]
+  proposalVotes    ProposalVote[]
+  completionVotes  CompletionVote[]
+  milestoneVotes   MilestoneVote[]
+  milestoneSignatures MilestoneSignature[]
+
+  @@map("users")
+}
+
+model Community {
+  id               String    @id @default(cuid())
+  contractAddress  String?   @unique  // Set once deployment confirmed on-chain
+  chainId          Int
+  name             String
+  type             CommunityType
+  description      String
+  scope            String?
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  // Governance (denormalised snapshot — source of truth is on-chain)
+  proposalApprovalThresholdBps Int    @default(6000)
+  proposalVotingWindowSecs     Int    @default(604800)  // 7 days
+  completionVoteWindowSecs     Int    @default(864000)  // 10 days
+  bidWindowSecs                Int    @default(1209600) // 14 days
+  councilReviewWindowSecs      Int    @default(1209600) // 14 days
+  tier1ThresholdUsdc           BigInt @default(1000000000)  // 1,000 USDC (6 decimals)
+  tier2ThresholdUsdc           BigInt @default(10000000000) // 10,000 USDC
+  minMembers                   Int    @default(2)
+  portionGrantMaxPct           Int    @default(30)
+  verificationMode             MembershipVerificationMode @default(OPEN)
+
+  // Council (denormalised)
+  councilSigners   String[]  // wallet addresses
+  councilThreshold Int       @default(2)
+
+  // Stats
+  memberCount              Int @default(0)
+  projectCount             Int @default(0)
+  completedProjectCount    Int @default(0)
+  totalValueCompletedUsdc  BigInt @default(0)
+
+  // Relations
+  memberships      Membership[]
+  projects         Project[]
+  targetedBounties BountyTargetCommunity[]
+
+  @@map("communities")
+}
+
+model Membership {
+  id          String     @id @default(cuid())
+  userId      String
+  communityId String
+  role        MemberRole @default(MEMBER)
+  joinedAt    DateTime   @default(now())
+  isActive    Boolean    @default(true)
+
+  user        User       @relation(fields: [userId], references: [id])
+  community   Community  @relation(fields: [communityId], references: [id])
+
+  @@unique([userId, communityId])
+  @@map("memberships")
+}
+
+model Project {
+  id               String        @id @default(cuid())
+  contractAddress  String?       @unique  // Set on deployment confirmation
+  communityId      String
+  chainId          Int
+  state            ProjectState  @default(PROPOSED)
+  ipfsProposalHash String
+  proposerId       String
+  awardedContractor String?      // wallet address
+  escrowToken      String        // USDT or USDC contract address
+  totalEscrowUsdc  BigInt        @default(0)
+  visibility       VisibilityMode @default(COMMUNITY_INTERNAL)
+  upvoteCount      Int           @default(0)
+  downvoteCount    Int           @default(0)
+  portionGrantRequested Boolean  @default(false)
+  portionGrantApproved  Boolean  @default(false)
+  portionGrantAmountUsdc BigInt  @default(0)
+  disputeReason    String?
+  councilDecisionReason String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  // Relations
+  community        Community     @relation(fields: [communityId], references: [id])
+  proposer         User          @relation("Proposer", fields: [proposerId], references: [id])
+  milestones       Milestone[]
+  bids             Bid[]
+  proposalVotes    ProposalVote[]
+  completionVotes  CompletionVote[]
+  targetCommunities ProjectTargetCommunity[]
+
+  @@map("projects")
+}
+
+model Milestone {
+  id                   String                   @id @default(cuid())
+  projectId            String?
+  bountyId             String?
+  index                Int
+  name                 String
+  description          String
+  valueUsdc            BigInt
+  expectedCompletionAt DateTime
+  verificationType     MilestoneVerificationType
+  state                MilestoneState           @default(PENDING)
+  ipfsEvidence         String?
+  signaturesReceived   Int                      @default(0)
+  signaturesRequired   Int                      @default(1)
+  rejectionCount       Int                      @default(0)
+  paidAt               DateTime?
+  createdAt            DateTime                 @default(now())
+
+  // Relations
+  project              Project?    @relation(fields: [projectId], references: [id])
+  bounty               Bounty?     @relation(fields: [bountyId], references: [id])
+  votes                MilestoneVote[]
+  signatures           MilestoneSignature[]
+
+  @@map("milestones")
+}
+
+model Bid {
+  id                 String   @id @default(cuid())
+  projectId          String?
+  bountyId           String?
+  contractorId       String
+  totalCostUsdc      BigInt
+  ipfsBidDocument    String
+  proposedTimelineDays Int
+  methodology        String
+  isAwarded          Boolean  @default(false)
+  submittedAt        DateTime @default(now())
+
+  project            Project? @relation(fields: [projectId], references: [id])
+  bounty             Bounty?  @relation(fields: [bountyId], references: [id])
+  contractor         User     @relation(fields: [contractorId], references: [id])
+
+  @@map("bids")
+}
+
+model Bounty {
+  id                       String         @id @default(cuid())
+  contractAddress          String?        @unique
+  creatorId                String
+  chainId                  Int
+  state                    ProjectState   @default(TENDERING)
+  ipfsBountyHash           String
+  escrowToken              String
+  totalEscrowUsdc          BigInt         @default(0)
+  visibility               VisibilityMode @default(PLATFORM_PUBLIC)
+  selectedContractorAddress String?
+  completionPanelAddresses String[]
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+
+  creator                  User           @relation(fields: [creatorId], references: [id])
+  milestones               Milestone[]
+  bids                     Bid[]
+  targetCommunities        BountyTargetCommunity[]
+
+  @@map("bounties")
+}
+
+model ProposalVote {
+  id        String  @id @default(cuid())
+  projectId String
+  userId    String
+  upvote    Boolean
+  castAt    DateTime @default(now())
+
+  project   Project @relation(fields: [projectId], references: [id])
+  voter     User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+  @@map("proposal_votes")
+}
+
+model CompletionVote {
+  id        String      @id @default(cuid())
+  projectId String
+  userId    String
+  choice    VoteChoice
+  castAt    DateTime    @default(now())
+
+  project   Project     @relation(fields: [projectId], references: [id])
+  voter     User        @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId])
+  @@map("completion_votes")
+}
+
+model MilestoneVote {
+  id          String   @id @default(cuid())
+  milestoneId String
+  userId      String
+  approved    Boolean
+  castAt      DateTime @default(now())
+
+  milestone   Milestone @relation(fields: [milestoneId], references: [id])
+  voter       User      @relation(fields: [userId], references: [id])
+
+  @@unique([milestoneId, userId])
+  @@map("milestone_votes")
+}
+
+model MilestoneSignature {
+  id          String   @id @default(cuid())
+  milestoneId String
+  signerId    String
+  signedAt    DateTime @default(now())
+
+  milestone   Milestone @relation(fields: [milestoneId], references: [id])
+  signer      User      @relation(fields: [signerId], references: [id])
+
+  @@unique([milestoneId, signerId])
+  @@map("milestone_signatures")
+}
+
+model ProjectTargetCommunity {
+  projectId   String
+  communityId String
+
+  project     Project   @relation(fields: [projectId], references: [id])
+  community   Community @relation(fields: [communityId], references: [id])
+
+  @@id([projectId, communityId])
+  @@map("project_target_communities")
+}
+
+model BountyTargetCommunity {
+  bountyId    String
+  communityId String
+
+  bounty      Bounty    @relation(fields: [bountyId], references: [id])
+  community   Community @relation(fields: [communityId], references: [id])
+
+  @@id([bountyId, communityId])
+  @@map("bounty_target_communities")
+}

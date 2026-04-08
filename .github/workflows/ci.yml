@@ -1,0 +1,136 @@
+name: The Working App CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # ── Smart Contract Tests ────────────────────────────────────
+  contracts:
+    name: Foundry Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Install dependencies
+        run: forge install
+
+      - name: Build contracts
+        run: forge build --sizes
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Run fuzz tests (extended on main)
+        if: github.ref == 'refs/heads/main'
+        run: forge test --fuzz-runs 10000
+
+      - name: Check formatting
+        run: forge fmt --check
+
+  # ── Backend Tests ───────────────────────────────────────────
+  backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: theworkingapp
+          POSTGRES_PASSWORD: theworkingapp
+          POSTGRES_DB: theworkingapp_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://theworkingapp:theworkingapp@localhost:5432/theworkingapp_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: test_jwt_secret_must_be_at_least_32_chars_long
+      REFRESH_TOKEN_SECRET: test_refresh_secret_must_be_at_least_32_chars
+      PRIMARY_RPC_URL: http://localhost:8545
+      PLATFORM_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      PLATFORM_WALLET_ADDRESS: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      MEDIATION_KEY_ADDRESS: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+      PINATA_API_KEY: test
+      PINATA_SECRET_API_KEY: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run migrations
+        run: npx prisma migrate deploy
+
+      - name: Run tests
+        run: npm test
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+  # ── Frontend Build ──────────────────────────────────────────
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        env:
+          VITE_API_BASE_URL: https://api.theworkingapp.io/v1
+          VITE_SOCKET_URL: https://api.theworkingapp.io
+          VITE_PRIMARY_CHAIN_ID: 8453
+          VITE_ONRAMPER_API_KEY: placeholder
+          VITE_WALLETCONNECT_PROJECT_ID: placeholder
+        run: npm run build

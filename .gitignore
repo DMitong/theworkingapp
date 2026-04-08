@@ -1,0 +1,40 @@
+# ── General ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+*.env
+.env
+.env.*
+!.env.example
+
+# ── Node ──────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+
+# ── Foundry ───────────────────────────────────────────────────
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+!contracts/broadcast/*/31337/
+contracts/deployments/*.json
+!contracts/deployments/.gitkeep
+
+# ── Prisma ────────────────────────────────────────────────────
+backend/prisma/migrations/dev/
+
+# ── Rust / Anchor ─────────────────────────────────────────────
+programs/target/
+.anchor/
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Coverage ──────────────────────────────────────────────────
+coverage/
+lcov.info
