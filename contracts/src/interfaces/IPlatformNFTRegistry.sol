@@ -31,6 +31,15 @@ interface IPlatformNFTRegistry is IDataTypes {
     /// @notice Update reputation scores after a project event. Only callable by Project/Bounty contracts.
     function updateReputation(uint256 tokenId, ReputationUpdate calldata update) external;
 
+    /// @notice Register a community registry for privileged membership callbacks.
+    function registerCommunity(address community) external;
+
+    /// @notice Register a project contract for privileged reputation callbacks.
+    function registerProjectContract(address project) external;
+
+    /// @notice Register a bounty contract for privileged reputation callbacks.
+    function registerBountyContract(address bounty) external;
+
     /// @notice Returns true if the token holds a valid KYC hash.
     function isVerified(uint256 tokenId) external view returns (bool);
 

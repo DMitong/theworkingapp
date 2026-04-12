@@ -32,7 +32,8 @@ interface ICommunityRegistry is IDataTypes {
         MilestoneDefinition[] calldata milestones,
         address escrowToken,
         VisibilityMode visibility,
-        address[] calldata targetCommunities
+        address[] calldata targetCommunities,
+        bytes[] calldata councilSignatures
     ) external returns (address projectContract);
 
     /// @notice Update governance parameters. Only callable by council multisig.

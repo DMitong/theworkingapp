@@ -43,6 +43,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
 
     // Dispute
     bool public disputeActive;
+    bool public paused;
 
     // ─── Constructor ──────────────────────────────────────────────────────────
 
@@ -81,10 +82,11 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     modifier onlyCreator() { require(msg.sender == creator, "Only creator"); _; }
     modifier onlyContractor() { require(msg.sender == selectedContractor, "Only contractor"); _; }
     modifier onlyMediationKey() { require(msg.sender == mediationKey, "Only mediation key"); _; }
+    modifier whenNotPaused() { require(!paused, "Paused"); _; }
 
     // ─── Bidding ──────────────────────────────────────────────────────────────
 
-    function submitBid(BidData calldata bid) external {
+    function submitBid(BidData calldata bid) external whenNotPaused {
         require(state == ProjectState.TENDERING, "Not in bidding phase");
         require(bids[msg.sender].totalCost == 0, "Already bid");
         bids[msg.sender] = bid;
@@ -92,7 +94,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         emit BidSubmitted(msg.sender, bid.totalCost, bid.ipfsBidDocument);
     }
 
-    function selectBid(address contractor) external onlyCreator {
+    function selectBid(address contractor) external onlyCreator whenNotPaused {
         require(state == ProjectState.TENDERING, "Not in bidding phase");
         require(bids[contractor].totalCost > 0, "No bid from contractor");
         selectedContractor = contractor;
@@ -100,7 +102,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         emit BidSelected(contractor);
     }
 
-    function fundEscrow(uint256 amount, address token) external nonReentrant {
+    function fundEscrow(uint256 amount, address token) external nonReentrant whenNotPaused {
         require(state == ProjectState.AWARDED, "Not in awarded state");
         require(token == escrowToken, "Wrong token");
         require(amount == totalEscrowRequired, "Amount must match total");
@@ -112,7 +114,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     // ─── Milestone execution ──────────────────────────────────────────────────
 
     function submitMilestoneCompletion(uint8 milestoneIndex, string calldata ipfsEvidence)
-        external onlyContractor
+        external onlyContractor whenNotPaused
     {
         require(state == ProjectState.ACTIVE, "Not active");
         require(milestoneIndex == currentMilestoneIndex, "Must complete in order");
@@ -122,7 +124,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     }
 
     /// @notice Creator approves a non-final milestone. Panel required for final milestone.
-    function approveMilestone(uint8 milestoneIndex) external onlyCreator {
+    function approveMilestone(uint8 milestoneIndex) external onlyCreator whenNotPaused {
         require(milestones[milestoneIndex].state == MilestoneState.UNDER_REVIEW, "Not under review");
         bool isFinal = milestoneIndex == milestones.length - 1;
 
@@ -136,7 +138,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         _releaseMilestone(milestoneIndex);
     }
 
-    function castPanelVote(uint8 milestoneIndex, bool approved) external {
+    function castPanelVote(uint8 milestoneIndex, bool approved) external whenNotPaused {
         require(milestones[milestoneIndex].state == MilestoneState.UNDER_REVIEW, "Not under review");
         bool isPanel = false;
         for (uint256 i = 0; i < completionPanel.length; i++) {
@@ -155,7 +157,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
 
     // ─── Dispute ──────────────────────────────────────────────────────────────
 
-    function raiseDispute(string calldata reason) external {
+    function raiseDispute(string calldata reason) external whenNotPaused {
         require(msg.sender == creator || msg.sender == selectedContractor, "Unauthorized");
         require(!disputeActive, "Dispute already active");
         disputeActive = true;
@@ -163,7 +165,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         emit DisputeRaised(msg.sender, reason);
     }
 
-    function executeMediationRuling(MediationRuling calldata ruling) external onlyMediationKey nonReentrant {
+    function executeMediationRuling(MediationRuling calldata ruling) external onlyMediationKey nonReentrant whenNotPaused {
         require(state == ProjectState.DISPUTED, "Not disputed");
         if (ruling.contractorAmount > 0) IERC20(escrowToken).safeTransfer(ruling.contractor, ruling.contractorAmount);
         if (ruling.funderRefund > 0) IERC20(escrowToken).safeTransfer(ruling.funder, ruling.funderRefund);
@@ -190,4 +192,9 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     function getState() external view returns (ProjectState) { return state; }
     function getMilestones() external view returns (MilestoneDefinition[] memory) { return milestones; }
     function getEscrowBalance() external view returns (uint256) { return IERC20(escrowToken).balanceOf(address(this)); }
+
+    function setPaused(bool value) external {
+        require(msg.sender == platformFactory, "Only factory");
+        paused = value;
+    }
 }

@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IDataTypes.sol";
 import "./PlatformNFTRegistry.sol";
+import "./CommunityRegistry.sol";
+import "./BountyContract.sol";
 
 /// @title PlatformFactory
 /// @notice Root factory contract. Deployed once per chain.
@@ -43,6 +45,7 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
     // ─── Admin ────────────────────────────────────────────────────────────────
 
     function setNFTRegistry(address registry) external onlyOwner {
+        require(registry != address(0), "Invalid registry");
         nftRegistry = PlatformNFTRegistry(registry);
         emit NFTRegistrySet(registry);
     }
@@ -53,8 +56,15 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
         emit MediationKeyUpdated(key);
     }
 
-    function pause() external onlyOwner { _pause(); }
-    function unpause() external onlyOwner { _unpause(); }
+    function pause() external onlyOwner {
+        _pause();
+        _syncChildPause(true);
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+        _syncChildPause(false);
+    }
 
     // ─── Minting (called by backend on user registration) ─────────────────────
 
@@ -76,9 +86,44 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
         CouncilConfig calldata councilConfig,
         GovernanceParams calldata governanceParams
     ) external whenNotPaused returns (address communityRegistry) {
-        // TODO: Implement community deployment
-        // See BUILD.md Step 4 for full spec
-        revert("Not implemented - see BUILD.md Step 4");
+        require(address(nftRegistry) != address(0), "NFT registry not set");
+        require(bytes(name).length > 0, "Invalid name");
+        _validateCouncilConfig(councilConfig);
+        _validateGovernanceParams(governanceParams);
+
+        CouncilConfig memory councilConfigMemory = _copyCouncilConfig(councilConfig);
+        GovernanceParams memory governanceParamsMemory = _copyGovernanceParams(governanceParams);
+
+        bytes32 salt = keccak256(abi.encodePacked(msg.sender, name, block.timestamp));
+        bytes memory initCode = abi.encodePacked(
+            type(CommunityRegistry).creationCode,
+            abi.encode(
+                name,
+                "GENERAL",
+                address(this),
+                address(nftRegistry),
+                councilConfigMemory,
+                governanceParamsMemory
+            )
+        );
+
+        communityRegistry = _computeCreate2Address(salt, keccak256(initCode));
+        nftRegistry.registerCommunity(communityRegistry);
+
+        CommunityRegistry deployedCommunity = new CommunityRegistry{salt: salt}(
+            name,
+            "GENERAL",
+            address(this),
+            address(nftRegistry),
+            councilConfigMemory,
+            governanceParamsMemory
+        );
+
+        communityRegistry = address(deployedCommunity);
+        deployedCommunities.push(communityRegistry);
+        isCommunity[communityRegistry] = true;
+
+        emit CommunityDeployed(communityRegistry, msg.sender, name);
     }
 
     // ─── Bounty Deployment ────────────────────────────────────────────────────
@@ -94,9 +139,33 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
         VisibilityMode visibility,
         address[] calldata targetCommunities
     ) external whenNotPaused returns (address bountyContract) {
-        // TODO: Implement bounty deployment
-        // See BUILD.md Step 7 for BountyContract spec
-        revert("Not implemented - see BUILD.md Step 7");
+        require(address(nftRegistry) != address(0), "NFT registry not set");
+        require(bytes(ipfsBountyHash).length > 0, "Invalid bounty hash");
+        require(escrowToken != address(0), "Invalid escrow token");
+        require(milestones.length > 0, "No milestones");
+
+        MilestoneDefinition[] memory milestonesMemory = _copyMilestones(milestones);
+        address[] memory targetsMemory = _copyAddressArray(targetCommunities);
+        address[] memory completionPanel = new address[](0);
+
+        BountyContract bounty = new BountyContract(
+            msg.sender,
+            address(this),
+            mediationKey,
+            ipfsBountyHash,
+            milestonesMemory,
+            escrowToken,
+            visibility,
+            targetsMemory,
+            completionPanel
+        );
+
+        bountyContract = address(bounty);
+        deployedBounties.push(bountyContract);
+        isBountyContract[bountyContract] = true;
+        nftRegistry.registerBountyContract(bountyContract);
+
+        emit BountyDeployed(bountyContract, msg.sender);
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
@@ -111,5 +180,97 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
 
     function getAllCommunities() external view returns (address[] memory) {
         return deployedCommunities;
+    }
+
+    function _validateCouncilConfig(CouncilConfig calldata councilConfig) internal pure {
+        require(councilConfig.signers.length > 0, "No council signers");
+        require(councilConfig.threshold > 0, "Invalid council threshold");
+        require(councilConfig.threshold <= councilConfig.signers.length, "Threshold exceeds signers");
+
+        for (uint256 i = 0; i < councilConfig.signers.length; i++) {
+            require(councilConfig.signers[i] != address(0), "Invalid council signer");
+            for (uint256 j = i + 1; j < councilConfig.signers.length; j++) {
+                require(councilConfig.signers[i] != councilConfig.signers[j], "Duplicate council signer");
+            }
+        }
+    }
+
+    function _validateGovernanceParams(GovernanceParams calldata governanceParams) internal pure {
+        require(governanceParams.proposalApprovalThreshold <= 10_000, "Invalid approval threshold");
+        require(governanceParams.minMembers > 0, "Invalid min members");
+        require(governanceParams.portionGrantMaxPercent <= 100, "Invalid grant max");
+        require(governanceParams.tier2Threshold >= governanceParams.tier1Threshold, "Invalid tier thresholds");
+    }
+
+    function _copyCouncilConfig(CouncilConfig calldata councilConfig) internal pure returns (CouncilConfig memory config) {
+        address[] memory signers = _copyAddressArray(councilConfig.signers);
+        config = CouncilConfig({ signers: signers, threshold: councilConfig.threshold });
+    }
+
+    function _copyGovernanceParams(
+        GovernanceParams calldata governanceParams
+    ) internal pure returns (GovernanceParams memory params) {
+        params = GovernanceParams({
+            proposalApprovalThreshold: governanceParams.proposalApprovalThreshold,
+            proposalVotingWindow: governanceParams.proposalVotingWindow,
+            completionVoteWindow: governanceParams.completionVoteWindow,
+            bidWindow: governanceParams.bidWindow,
+            councilReviewWindow: governanceParams.councilReviewWindow,
+            tier1Threshold: governanceParams.tier1Threshold,
+            tier2Threshold: governanceParams.tier2Threshold,
+            minMembers: governanceParams.minMembers,
+            portionGrantMaxPercent: governanceParams.portionGrantMaxPercent,
+            verificationMode: governanceParams.verificationMode
+        });
+    }
+
+    function _copyMilestones(
+        MilestoneDefinition[] calldata milestones
+    ) internal pure returns (MilestoneDefinition[] memory milestonesMemory) {
+        milestonesMemory = new MilestoneDefinition[](milestones.length);
+        for (uint256 i = 0; i < milestones.length; i++) {
+            require(milestones[i].value > 0, "Invalid milestone value");
+            milestonesMemory[i] = milestones[i];
+        }
+    }
+
+    function _copyAddressArray(address[] calldata input) internal pure returns (address[] memory output) {
+        output = new address[](input.length);
+        for (uint256 i = 0; i < input.length; i++) {
+            output[i] = input[i];
+        }
+    }
+
+    function _computeCreate2Address(bytes32 salt, bytes32 initCodeHash) internal view returns (address predicted) {
+        predicted = address(
+            uint160(
+                uint256(
+                    keccak256(
+                        abi.encodePacked(
+                            bytes1(0xff),
+                            address(this),
+                            salt,
+                            initCodeHash
+                        )
+                    )
+                )
+            )
+        );
+    }
+
+    function _syncChildPause(bool pausedState) internal {
+        for (uint256 i = 0; i < deployedCommunities.length; i++) {
+            (bool success, ) = deployedCommunities[i].call(
+                abi.encodeWithSignature("setPaused(bool)", pausedState)
+            );
+            require(success, "Community pause sync failed");
+        }
+
+        for (uint256 i = 0; i < deployedBounties.length; i++) {
+            (bool success, ) = deployedBounties[i].call(
+                abi.encodeWithSignature("setPaused(bool)", pausedState)
+            );
+            require(success, "Bounty pause sync failed");
+        }
     }
 }
