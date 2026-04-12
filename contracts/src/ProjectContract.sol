@@ -175,14 +175,14 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         // if APPROVE: _transition(TENDERING); publish tender
         // if REQUEST_REVISION: _transition(PROPOSED); reset vote window
         // if CLOSE: _transition(CLOSED); record reason on-chain
-        revert("Not implemented — see BUILD.md Step 6");
+        revert("Not implemented - see BUILD.md Step 6");
     }
 
     /// @dev TODO: Implement tender publication with visibility settings.
     function publishTender(VisibilityMode _visibility, address[] calldata _targetCommunities, bytes[] calldata signatures)
         external onlyState(ProjectState.TENDERING)
     {
-        revert("Not implemented — see BUILD.md Step 6");
+        revert("Not implemented - see BUILD.md Step 6");
     }
 
     // ─── Bidding ──────────────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         // TODO: Validate milestones sum to total bid value
         // TODO: Set milestones, awardedContractor, totalEscrowRequired
         // TODO: _transition(AWARDED)
-        revert("Not implemented — see BUILD.md Step 6");
+        revert("Not implemented - see BUILD.md Step 6");
     }
 
     function acceptAward() external onlyState(ProjectState.AWARDED) onlyContractor {
@@ -283,7 +283,7 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
     {
         // TODO: Implement vote tracking and threshold check
         // On threshold met: _releaseMilestonePayment(milestoneIndex)
-        revert("Not implemented — see BUILD.md Step 6");
+        revert("Not implemented - see BUILD.md Step 6");
     }
 
     // ─── Completion vote ──────────────────────────────────────────────────────
@@ -294,7 +294,7 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         // TODO: Track per-member vote, update counts, check for outcome threshold
         // On COMPLETED outcome: _releaseAllEscrow()
         // On DISPUTED: _transition(DISPUTED)
-        revert("Not implemented — see BUILD.md Step 6");
+        revert("Not implemented - see BUILD.md Step 6");
     }
 
     // ─── Dispute ─────────────────────────────────────────────────────────────

@@ -78,7 +78,7 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
     ) external whenNotPaused returns (address communityRegistry) {
         // TODO: Implement community deployment
         // See BUILD.md Step 4 for full spec
-        revert("Not implemented — see BUILD.md Step 4");
+        revert("Not implemented - see BUILD.md Step 4");
     }
 
     // ─── Bounty Deployment ────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ contract PlatformFactory is Ownable, Pausable, IDataTypes {
     ) external whenNotPaused returns (address bountyContract) {
         // TODO: Implement bounty deployment
         // See BUILD.md Step 7 for BountyContract spec
-        revert("Not implemented — see BUILD.md Step 7");
+        revert("Not implemented - see BUILD.md Step 7");
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────

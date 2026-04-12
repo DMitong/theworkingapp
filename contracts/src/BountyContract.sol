@@ -130,7 +130,7 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
             // Final milestone with panel — wait for panel votes too
             // Creator approval counts as one panel vote
             // TODO: Implement proper panel vote collection
-            revert("Final milestone requires panel vote — use castPanelVote");
+            revert("Final milestone requires panel vote - use castPanelVote");
         }
 
         _releaseMilestone(milestoneIndex);

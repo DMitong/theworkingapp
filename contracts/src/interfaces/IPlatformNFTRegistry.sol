@@ -34,8 +34,8 @@ interface IPlatformNFTRegistry is IDataTypes {
     /// @notice Returns true if the token holds a valid KYC hash.
     function isVerified(uint256 tokenId) external view returns (bool);
 
-    /// @notice Returns true if the wallet is a member of the given community.
-    function isMember(address user, address community) external view returns (bool);
+    /// @notice Returns true if the token is currently a member of the given community.
+    function isMember(uint256 tokenId, address community) external view returns (bool);
 
     /// @notice Returns the token ID for a given wallet address. Returns 0 if not registered.
     function getTokenId(address user) external view returns (uint256);

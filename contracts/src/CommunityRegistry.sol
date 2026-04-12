@@ -138,7 +138,7 @@ contract CommunityRegistry is ICommunityRegistry {
         // TODO: nftRegistry.registerProjectContract(projectContract)
         // TODO: _projectIndex.push(projectContract)
         // TODO: emit ProjectDeployed(projectContract, keccak256(bytes(ipfsProposalHash)))
-        revert("Not implemented — see BUILD.md Step 5");
+        revert("Not implemented - see BUILD.md Step 5");
     }
 
     // ─── Governance ───────────────────────────────────────────────────────────

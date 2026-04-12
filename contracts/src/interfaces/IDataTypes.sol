@@ -35,6 +35,13 @@ interface IDataTypes {
         REJECTED
     }
 
+    enum VoteOutcome {
+        PENDING,
+        APPROVED,
+        REJECTED,
+        DISPUTED
+    }
+
     enum VoteChoice {
         COMPLETED,        // Completed as specified
         PARTIAL,          // Partially completed
