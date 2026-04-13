@@ -4,39 +4,35 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IProjectContract.sol";
 import "./interfaces/IPlatformNFTRegistry.sol";
+import "./libraries/Escrow.sol";
+import "./libraries/MilestoneManager.sol";
+import "./libraries/Voting.sol";
 
-/// @title ProjectContract
-/// @notice Child contract representing a single community project.
-///         Manages the full lifecycle from proposal through milestone-gated
-///         escrow release to final completion vote.
-/// @dev    Deployed by CommunityRegistry.deployProject().
-///         See contracts/BUILD.md — Step 6 for full implementation notes.
-///
-///         STATE MACHINE:
-///         PROPOSED → COUNCIL_REVIEW → TENDERING → AWARDED → ACTIVE
-///         → MILESTONE_UNDER_REVIEW ↔ MILESTONE_PAID (loops per milestone)
-///         → COMPLETION_VOTE → COMPLETED | DISPUTED → (mediation) → COMPLETED | refunded
 contract ProjectContract is IProjectContract, ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    // ─── State ────────────────────────────────────────────────────────────────
+    using ECDSA for bytes32;
+    using MessageHashUtils for bytes32;
+    using Escrow for Escrow.Ledger;
+    using MilestoneManager for MilestoneDefinition[];
+    using Voting for Voting.Tally;
 
     address public immutable communityRegistry;
     address public immutable platformFactory;
-    address public mediationKey;          // Copied from factory at deploy time
+    address public mediationKey;
 
     ProjectState public state;
-    string public ipfsProposalHash;       // IPFS hash of proposal data
-    address public escrowToken;           // USDT or USDC contract address
+    string public ipfsProposalHash;
+    address public escrowToken;
     VisibilityMode public visibility;
     address[] public targetCommunities;
 
     // Proposal voting
-    mapping(address => int8) public proposalVotes; // 1 = up, -1 = down, 0 = not voted
-    uint256 public upvoteCount;
-    uint256 public downvoteCount;
+    mapping(address => uint8) public proposalVotes; // 1 = up, 2 = down
+    Voting.Tally private proposalVoteTally;
     uint256 public proposalVoteDeadline;
 
     // Contracting
@@ -50,7 +46,10 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
     uint8 public currentMilestoneIndex;
     mapping(uint8 => mapping(address => bool)) public milestoneSignatures;
     mapping(uint8 => mapping(address => uint8)) public milestoneVotes;
-    mapping(uint8 => uint256) public milestoneVoteCount;
+    mapping(uint8 => Voting.Tally) private milestoneTallies;
+
+    // Escrow
+    Escrow.Ledger private escrowLedger;
 
     // Portion grant
     uint256 public portionGrantAmount;
@@ -58,8 +57,8 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
     bool public portionGrantApproved;
 
     // Completion vote
-    mapping(address => VoteChoice) public completionVotes;
-    mapping(VoteChoice => uint256) public completionVoteCounts;
+    mapping(address => uint8) public completionVotes; // 1=APPROVED, 2=REJECTED, 3=DISPUTED
+    Voting.Tally private completionVoteTally;
     uint256 public completionVoteDeadline;
     bool public completionVoteCast;
 
@@ -68,14 +67,12 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
     string public disputeReason;
     address public disputeRaisedBy;
 
-    // Governance snapshot (copied from CommunityRegistry at deploy time)
     GovernanceParams public governanceParams;
     address[] public councilSigners;
     uint8 public councilThreshold;
+    uint256 public councilNonce;
 
     IPlatformNFTRegistry public nftRegistry;
-
-    // ─── Constructor ──────────────────────────────────────────────────────────
 
     constructor(
         address _communityRegistry,
@@ -109,8 +106,6 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         emit StateTransition(ProjectState.PROPOSED, ProjectState.PROPOSED);
     }
 
-    // ─── Modifiers ────────────────────────────────────────────────────────────
-
     modifier onlyState(ProjectState required) {
         require(state == required, "Invalid state for this action");
         _;
@@ -133,59 +128,59 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         require(msg.sender == mediationKey, "Only mediation key");
         _;
     }
-
-    // ─── Proposal voting ──────────────────────────────────────────────────────
-
-    function submitProposal(string calldata ipfsHash) external {
-        // NOTE: In this implementation, the proposal is submitted at construction.
-        // This function is available if the registry pattern requires a separate submission step.
+    
+    function submitProposal(string calldata) external pure {
         revert("Proposal submitted at construction");
     }
 
     function castProposalVote(bool upvote) external onlyMember onlyState(ProjectState.PROPOSED) {
         require(block.timestamp <= proposalVoteDeadline, "Voting window closed");
-        require(proposalVotes[msg.sender] == 0, "Already voted");
+        uint8 choice = upvote ? 1 : 2;
+        Voting.castVote(proposalVotes, proposalVoteTally, msg.sender, choice);
 
-        proposalVotes[msg.sender] = upvote ? int8(1) : int8(-1);
-        if (upvote) upvoteCount++; else downvoteCount++;
+        uint256 upvotes = proposalVoteTally.counts[1];
+        uint256 downvotes = proposalVoteTally.counts[2];
 
-        emit ProposalVoteCast(msg.sender, upvote, upvoteCount, downvoteCount);
-
-        // Check if approval threshold reached
-        // TODO: Get total member count from community registry for threshold calculation
-        // For now, trigger on absolute upvote count matching governance threshold logic
+        emit ProposalVoteCast(msg.sender, upvote, upvotes, downvotes);
         _checkProposalThreshold();
     }
 
     function _checkProposalThreshold() internal {
-        // TODO: Implement threshold check against governanceParams.proposalApprovalThreshold
-        // threshold is in basis points relative to total eligible voters
-        // If met: transition to COUNCIL_REVIEW
-        // emit CouncilReviewTriggered(upvoteCount, upvoteCount + downvoteCount);
-        // _transition(ProjectState.COUNCIL_REVIEW);
+        uint256 totalMembers = getCommunityMemberCount();
+        if (totalMembers == 0) return;
+        uint256 upvotes = proposalVoteTally.counts[1];
+        
+        if (upvotes * 10000 >= totalMembers * governanceParams.proposalApprovalThreshold) {
+            emit StateTransition(state, ProjectState.COUNCIL_REVIEW);
+            state = ProjectState.COUNCIL_REVIEW;
+            return;
+        }
     }
 
-    // ─── Council decision ─────────────────────────────────────────────────────
-
-    /// @dev TODO: Implement with council multisig verification.
     function councilDecision(AwardDecision decision, string calldata reason, bytes[] calldata signatures)
         external onlyState(ProjectState.COUNCIL_REVIEW)
     {
-        // TODO: _verifyCouncilSignatures(...)
-        // if APPROVE: _transition(TENDERING); publish tender
-        // if REQUEST_REVISION: _transition(PROPOSED); reset vote window
-        // if CLOSE: _transition(CLOSED); record reason on-chain
-        revert("Not implemented - see BUILD.md Step 6");
+        _verifyCouncilSignatures(keccak256(abi.encode("councilDecision", decision, reason, councilNonce)), signatures);
+        councilNonce++;
+
+        if (decision == AwardDecision.APPROVE) {
+            _transition(ProjectState.TENDERING);
+        } else if (decision == AwardDecision.REQUEST_REVISION) {
+            _transition(ProjectState.PROPOSED);
+            proposalVoteDeadline = block.timestamp + governanceParams.proposalVotingWindow;
+        } else if (decision == AwardDecision.CLOSE) {
+            _transition(ProjectState.CLOSED);
+        }
     }
 
-    /// @dev TODO: Implement tender publication with visibility settings.
     function publishTender(VisibilityMode _visibility, address[] calldata _targetCommunities, bytes[] calldata signatures)
         external onlyState(ProjectState.TENDERING)
     {
-        revert("Not implemented - see BUILD.md Step 6");
+        _verifyCouncilSignatures(keccak256(abi.encode("publishTender", _visibility, _targetCommunities, councilNonce)), signatures);
+        councilNonce++;
+        visibility = _visibility;
+        targetCommunities = _targetCommunities;
     }
-
-    // ─── Bidding ──────────────────────────────────────────────────────────────
 
     function submitBid(BidData calldata bid) external onlyState(ProjectState.TENDERING) {
         require(bids[msg.sender].totalCost == 0, "Already submitted bid");
@@ -194,36 +189,32 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         emit BidSubmitted(msg.sender, bid.totalCost, bid.ipfsBidDocument);
     }
 
-    // ─── Award ────────────────────────────────────────────────────────────────
-
-    /// @dev TODO: Implement tiered award logic. See BUILD.md Step 6.
     function awardContract(address contractor, MilestoneDefinition[] calldata _milestones, bytes[] calldata signatures)
         external onlyState(ProjectState.TENDERING)
     {
-        // TODO: Check award tier vs governanceParams.tier1Threshold / tier2Threshold
-        // TODO: Verify council signatures or vote outcome
-        // TODO: Validate milestones sum to total bid value
-        // TODO: Set milestones, awardedContractor, totalEscrowRequired
-        // TODO: _transition(AWARDED)
-        revert("Not implemented - see BUILD.md Step 6");
+        require(bids[contractor].totalCost > 0, "Contractor has no bid");
+        _verifyCouncilSignatures(keccak256(abi.encode("awardContract", contractor, _milestones, councilNonce)), signatures);
+        councilNonce++;
+
+        totalEscrowRequired = milestones.initializeMilestones(_milestones);
+        require(bids[contractor].totalCost == totalEscrowRequired, "Milestones sum must equal bid total");
+        escrowLedger.initializeMilestoneBalances(milestones);
+        awardedContractor = contractor;
+
+        _transition(ProjectState.AWARDED);
     }
 
     function acceptAward() external onlyState(ProjectState.AWARDED) onlyContractor {
-        // State remains AWARDED until escrow is funded
         emit AwardAccepted(awardedContractor);
     }
-
-    // ─── Escrow funding ───────────────────────────────────────────────────────
 
     function fundEscrow(uint256 amount, address token) external nonReentrant onlyState(ProjectState.AWARDED) {
         require(token == escrowToken, "Wrong token");
         require(amount == totalEscrowRequired, "Amount must match total project value");
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        escrowLedger.deposit(amount, token);
         _transition(ProjectState.ACTIVE);
         emit EscrowFunded(msg.sender, amount, token);
     }
-
-    // ─── Portion grant ────────────────────────────────────────────────────────
 
     function requestPortionGrant(uint256 amount, string calldata ipfsPurpose)
         external onlyState(ProjectState.ACTIVE) onlyContractor
@@ -235,45 +226,32 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         emit PortionGrantRequested(msg.sender, amount);
     }
 
-    /// @dev TODO: Implement approval — council vote for sub-tier, community vote for above-tier.
     function approvePortionGrant(bytes[] calldata signatures)
         external onlyState(ProjectState.ACTIVE)
     {
         require(portionGrantRequested && !portionGrantApproved, "Invalid grant state");
-        // TODO: verify signatures / vote outcome
+        _verifyCouncilSignatures(keccak256(abi.encode("approvePortionGrant", portionGrantAmount, councilNonce)), signatures);
+        councilNonce++;
         portionGrantApproved = true;
-        IERC20(escrowToken).safeTransfer(awardedContractor, portionGrantAmount);
+        
+        escrowLedger.releaseMilestone(0, awardedContractor, portionGrantAmount, escrowToken);
         emit PortionGrantApproved(portionGrantAmount);
     }
-
-    // ─── Milestone execution ──────────────────────────────────────────────────
 
     function submitMilestoneCompletion(uint8 milestoneIndex, string calldata ipfsEvidence)
         external onlyState(ProjectState.ACTIVE) onlyContractor
     {
-        require(milestoneIndex == currentMilestoneIndex, "Must complete milestones in order");
-        require(milestones[milestoneIndex].state == MilestoneState.PENDING, "Milestone not pending");
-        milestones[milestoneIndex].ipfsEvidence = ipfsEvidence;
-        milestones[milestoneIndex].state = MilestoneState.UNDER_REVIEW;
+        milestones.claimMilestone(currentMilestoneIndex, milestoneIndex, ipfsEvidence);
         _transition(ProjectState.MILESTONE_UNDER_REVIEW);
         emit MilestoneClaimSubmitted(milestoneIndex, ipfsEvidence);
     }
 
     function signMilestone(uint8 milestoneIndex) external onlyState(ProjectState.MILESTONE_UNDER_REVIEW) {
-        MilestoneDefinition storage milestone = milestones[milestoneIndex];
-        require(
-            milestone.verificationType == MilestoneVerificationType.COUNCIL_ONLY ||
-            milestone.verificationType == MilestoneVerificationType.COUNCIL_MEMBER_QUORUM,
-            "Milestone not council sign-off type"
-        );
-        require(!milestoneSignatures[milestoneIndex][msg.sender], "Already signed");
         require(_isCouncilMember(msg.sender), "Not a council member");
+        uint8 numSigs = milestones.signMilestone(milestoneSignatures, milestoneIndex, msg.sender);
+        emit MilestoneSigned(milestoneIndex, msg.sender, numSigs);
 
-        milestoneSignatures[milestoneIndex][msg.sender] = true;
-        milestone.signaturesReceived++;
-        emit MilestoneSigned(milestoneIndex, msg.sender, milestone.signaturesReceived);
-
-        if (milestone.signaturesReceived >= milestone.signaturesRequired) {
+        if (numSigs >= milestones[milestoneIndex].signaturesRequired) {
             _releaseMilestonePayment(milestoneIndex);
         }
     }
@@ -281,23 +259,40 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
     function castMilestoneVote(uint8 milestoneIndex, uint8 choice)
         external onlyState(ProjectState.MILESTONE_UNDER_REVIEW) onlyMember
     {
-        // TODO: Implement vote tracking and threshold check
-        // On threshold met: _releaseMilestonePayment(milestoneIndex)
-        revert("Not implemented - see BUILD.md Step 6");
+        require(choice == 1 || choice == 2, "Invalid choice"); // 1=Yes, 2=No
+        Voting.castVote(milestoneVotes[milestoneIndex], milestoneTallies[milestoneIndex], msg.sender, choice);
+        
+        uint256 threshold = governanceParams.proposalApprovalThreshold;
+        uint256 totalMembers = getCommunityMemberCount();
+        
+        if (Voting.meetsThreshold(milestoneTallies[milestoneIndex].counts[1], totalMembers, threshold)) {
+            _releaseMilestonePayment(milestoneIndex);
+        } else if (Voting.meetsThreshold(milestoneTallies[milestoneIndex].counts[2], totalMembers, threshold)) {
+            milestones.rejectMilestone(milestoneIndex);
+            _transition(ProjectState.ACTIVE);
+        }
     }
-
-    // ─── Completion vote ──────────────────────────────────────────────────────
 
     function castCompletionVote(VoteChoice choice) external onlyState(ProjectState.COMPLETION_VOTE) onlyMember {
         require(block.timestamp <= completionVoteDeadline, "Vote window closed");
         require(!completionVoteCast, "Already voted");
-        // TODO: Track per-member vote, update counts, check for outcome threshold
-        // On COMPLETED outcome: _releaseAllEscrow()
-        // On DISPUTED: _transition(DISPUTED)
-        revert("Not implemented - see BUILD.md Step 6");
+        
+        uint8 choiceVal = choice == VoteChoice.COMPLETED ? 1 : (choice == VoteChoice.DISPUTE ? 3 : 2);
+        Voting.castVote(completionVotes, completionVoteTally, msg.sender, choiceVal);
+        
+        uint256 totalMembers = getCommunityMemberCount();
+        uint256 threshold = governanceParams.proposalApprovalThreshold;
+        
+        VoteOutcome outcome = Voting.getResult(completionVoteTally, totalMembers, threshold, 1, 2, 3);
+        if (outcome == VoteOutcome.APPROVED) {
+            completionVoteCast = true;
+            escrowLedger.releaseAll(awardedContractor, escrowToken);
+            _transition(ProjectState.COMPLETED);
+        } else if (outcome == VoteOutcome.DISPUTED) {
+            completionVoteCast = true;
+            _transition(ProjectState.DISPUTED);
+        }
     }
-
-    // ─── Dispute ─────────────────────────────────────────────────────────────
 
     function raiseDispute(string calldata reason) external {
         require(msg.sender == awardedContractor || ICommunityRegistry_isMember(communityRegistry, msg.sender), "Unauthorized");
@@ -305,45 +300,52 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         disputeActive = true;
         disputeReason = reason;
         disputeRaisedBy = msg.sender;
-        _transition(ProjectState.DISPUTED);
+        
+        if (state != ProjectState.COMPLETION_VOTE && state != ProjectState.COMPLETED) {
+            escrowLedger.freeze();
+            _transition(ProjectState.DISPUTED);
+        }
         emit DisputeRaised(msg.sender, reason);
     }
 
     function executeMediationRuling(MediationRuling calldata ruling) external onlyMediationKey nonReentrant {
         require(state == ProjectState.DISPUTED, "Not in dispute");
-        uint256 contractBal = IERC20(escrowToken).balanceOf(address(this));
-        require(ruling.contractorAmount + ruling.funderRefund <= contractBal, "Ruling exceeds balance");
+        
+        if (escrowLedger.frozen) {
+            escrowLedger.unfreeze();
+        }
+        
+        uint256 available = escrowLedger.remainingBalance();
+        require(ruling.contractorAmount + ruling.funderRefund <= available, "Exceeds balance");
 
         if (ruling.contractorAmount > 0) {
             IERC20(escrowToken).safeTransfer(ruling.contractor, ruling.contractorAmount);
+            escrowLedger.totalReleased += ruling.contractorAmount;
         }
         if (ruling.funderRefund > 0) {
             IERC20(escrowToken).safeTransfer(ruling.funder, ruling.funderRefund);
+            escrowLedger.totalReleased += ruling.funderRefund;
         }
+
         _transition(ProjectState.COMPLETED);
         emit MediationRulingExecuted(ruling);
     }
 
-    // ─── Internal helpers ─────────────────────────────────────────────────────
-
     function _releaseMilestonePayment(uint8 milestoneIndex) internal nonReentrant {
-        MilestoneDefinition storage milestone = milestones[milestoneIndex];
-        milestone.state = MilestoneState.PAID;
-        uint256 payment = milestone.value;
+        bool allPaid = milestones.completeMilestone(milestoneIndex);
+        uint256 payment = milestones[milestoneIndex].value;
 
-        // Deduct portion grant from first milestone
         if (milestoneIndex == 0 && portionGrantApproved) {
             payment = payment > portionGrantAmount ? payment - portionGrantAmount : 0;
         }
 
-        IERC20(escrowToken).safeTransfer(awardedContractor, payment);
+        if (payment > 0) {
+            escrowLedger.releaseMilestone(milestoneIndex, awardedContractor, payment, escrowToken);
+        }
         emit MilestonePaid(milestoneIndex, awardedContractor, payment);
-
+        
         currentMilestoneIndex++;
-
-        // Check if this was the last milestone
-        if (currentMilestoneIndex >= milestones.length) {
-            // Open final completion vote
+        if (allPaid) {
             completionVoteDeadline = block.timestamp + governanceParams.completionVoteWindow;
             _transition(ProjectState.COMPLETION_VOTE);
             emit CompletionVoteOpened();
@@ -365,7 +367,26 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         return false;
     }
 
-    /// @dev Helper to call isMember on CommunityRegistry without importing it (avoids circular deps).
+    function _verifyCouncilSignatures(bytes32 messageHash, bytes[] calldata signatures) internal view {
+        require(signatures.length >= councilThreshold, "Insufficient signatures");
+        bytes32 ethHash = messageHash.toEthSignedMessageHash();
+        address[] memory recovered = new address[](signatures.length);
+        uint8 validCount = 0;
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address signer = ethHash.recover(signatures[i]);
+            for (uint256 j = 0; j < councilSigners.length; j++) {
+                if (councilSigners[j] == signer) {
+                    bool duplicate = false;
+                    for (uint256 k = 0; k < validCount; k++) {
+                        if (recovered[k] == signer) { duplicate = true; break; }
+                    }
+                    if (!duplicate) { recovered[validCount++] = signer; break; }
+                }
+            }
+        }
+        require(validCount >= councilThreshold, "Not enough valid council signatures");
+    }
+
     function ICommunityRegistry_isMember(address registry, address user) internal view returns (bool) {
         (bool success, bytes memory data) = registry.staticcall(
             abi.encodeWithSignature("isMember(address)", user)
@@ -374,7 +395,13 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         return abi.decode(data, (bool));
     }
 
-    // ─── Views ────────────────────────────────────────────────────────────────
+    function getCommunityMemberCount() internal view returns (uint256) {
+        (bool success, bytes memory data) = communityRegistry.staticcall(
+            abi.encodeWithSignature("getMemberCount()")
+        );
+        if (!success || data.length == 0) return 0;
+        return abi.decode(data, (uint256));
+    }
 
     function getState() external view returns (ProjectState) { return state; }
     function getMilestones() external view returns (MilestoneDefinition[] memory) { return milestones; }
@@ -389,4 +416,12 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         return IERC20(escrowToken).balanceOf(address(this));
     }
     function getAwardedContractor() external view returns (address) { return awardedContractor; }
+
+    function getProposalVoteCounts() external view returns (uint256 upvotes, uint256 downvotes) {
+        return (proposalVoteTally.counts[1], proposalVoteTally.counts[2]);
+    }
+
+    function getCompletionVoteCounts() external view returns (uint256 approved, uint256 rejected, uint256 disputed) {
+        return (completionVoteTally.counts[1], completionVoteTally.counts[2], completionVoteTally.counts[3]);
+    }
 }
