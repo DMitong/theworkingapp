@@ -201,6 +201,12 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         escrowLedger.initializeMilestoneBalances(milestones);
         awardedContractor = contractor;
 
+        // Update contractor reputation: project awarded
+        uint256 contractorTokenId = nftRegistry.getTokenId(contractor);
+        if (contractorTokenId != 0) {
+            nftRegistry.updateReputation(contractorTokenId, ReputationUpdate(false, false, true, 0));
+        }
+
         _transition(ProjectState.AWARDED);
     }
 
@@ -286,10 +292,22 @@ contract ProjectContract is IProjectContract, ReentrancyGuard {
         VoteOutcome outcome = Voting.getResult(completionVoteTally, totalMembers, threshold, 1, 2, 3);
         if (outcome == VoteOutcome.APPROVED) {
             completionVoteCast = true;
-            escrowLedger.releaseAll(awardedContractor, escrowToken);
+            if (escrowLedger.remainingBalance() > 0) {
+                escrowLedger.releaseAll(awardedContractor, escrowToken);
+            }
+            // Update contractor reputation: project completed with max score
+            uint256 tokenId = nftRegistry.getTokenId(awardedContractor);
+            if (tokenId != 0) {
+                nftRegistry.updateReputation(tokenId, ReputationUpdate(true, false, false, 100));
+            }
             _transition(ProjectState.COMPLETED);
         } else if (outcome == VoteOutcome.DISPUTED) {
             completionVoteCast = true;
+            // Update contractor reputation: project disputed
+            uint256 tokenId = nftRegistry.getTokenId(awardedContractor);
+            if (tokenId != 0) {
+                nftRegistry.updateReputation(tokenId, ReputationUpdate(false, true, false, 0));
+            }
             _transition(ProjectState.DISPUTED);
         }
     }
