@@ -5,15 +5,13 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IBountyContract.sol";
+import "./libraries/Escrow.sol";
+import "./libraries/MilestoneManager.sol";
 
-/// @title BountyContract
-/// @notice Child contract for individual bounties (Open Track).
-///         Simpler lifecycle than ProjectContract — no community governance,
-///         creator + optional completion panel verify milestones.
-/// @dev    Deployed by PlatformFactory.deployBounty().
-///         See contracts/BUILD.md — Step 7 for full implementation notes.
 contract BountyContract is IBountyContract, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using Escrow for Escrow.Ledger;
+    using MilestoneManager for MilestoneDefinition[];
 
     // ─── State ────────────────────────────────────────────────────────────────
 
@@ -30,6 +28,8 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     MilestoneDefinition[] public milestones;
     uint8 public currentMilestoneIndex;
     uint256 public totalEscrowRequired;
+
+    Escrow.Ledger private escrowLedger;
 
     address[] public bidderList;
     mapping(address => BidData) public bids;
@@ -66,12 +66,9 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         visibility = _visibility;
         targetCommunities = _targetCommunities;
         completionPanel = _completionPanel;
-        panelRequired = uint8((_completionPanel.length / 2) + 1); // Simple majority
+        panelRequired = uint8((_completionPanel.length / 2) + 1);
 
-        for (uint256 i = 0; i < _milestones.length; i++) {
-            milestones.push(_milestones[i]);
-            totalEscrowRequired += _milestones[i].value;
-        }
+        totalEscrowRequired = milestones.initializeMilestones(_milestones);
 
         state = ProjectState.TENDERING;
         emit BountyCreated(_creator, _ipfsBountyHash, _visibility);
@@ -97,6 +94,11 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     function selectBid(address contractor) external onlyCreator whenNotPaused {
         require(state == ProjectState.TENDERING, "Not in bidding phase");
         require(bids[contractor].totalCost > 0, "No bid from contractor");
+        
+        uint256 requiredForBid = bids[contractor].totalCost;
+        require(requiredForBid == totalEscrowRequired, "Milestones sum must equal bid total");
+        
+        escrowLedger.initializeMilestoneBalances(milestones);
         selectedContractor = contractor;
         state = ProjectState.AWARDED;
         emit BidSelected(contractor);
@@ -106,7 +108,8 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         require(state == ProjectState.AWARDED, "Not in awarded state");
         require(token == escrowToken, "Wrong token");
         require(amount == totalEscrowRequired, "Amount must match total");
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        
+        escrowLedger.deposit(amount, token);
         state = ProjectState.ACTIVE;
         emit EscrowFunded(msg.sender, amount);
     }
@@ -117,21 +120,15 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         external onlyContractor whenNotPaused
     {
         require(state == ProjectState.ACTIVE, "Not active");
-        require(milestoneIndex == currentMilestoneIndex, "Must complete in order");
-        milestones[milestoneIndex].ipfsEvidence = ipfsEvidence;
-        milestones[milestoneIndex].state = MilestoneState.UNDER_REVIEW;
+        milestones.claimMilestone(currentMilestoneIndex, milestoneIndex, ipfsEvidence);
         emit MilestoneClaimSubmitted(milestoneIndex, ipfsEvidence);
     }
 
-    /// @notice Creator approves a non-final milestone. Panel required for final milestone.
     function approveMilestone(uint8 milestoneIndex) external onlyCreator whenNotPaused {
         require(milestones[milestoneIndex].state == MilestoneState.UNDER_REVIEW, "Not under review");
         bool isFinal = milestoneIndex == milestones.length - 1;
 
         if (isFinal && completionPanel.length > 0) {
-            // Final milestone with panel — wait for panel votes too
-            // Creator approval counts as one panel vote
-            // TODO: Implement proper panel vote collection
             revert("Final milestone requires panel vote - use castPanelVote");
         }
 
@@ -140,6 +137,9 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
 
     function castPanelVote(uint8 milestoneIndex, bool approved) external whenNotPaused {
         require(milestones[milestoneIndex].state == MilestoneState.UNDER_REVIEW, "Not under review");
+        bool isFinal = milestoneIndex == milestones.length - 1;
+        require(isFinal, "Panel vote only for final milestone");
+
         bool isPanel = false;
         for (uint256 i = 0; i < completionPanel.length; i++) {
             if (completionPanel[i] == msg.sender) { isPanel = true; break; }
@@ -161,14 +161,34 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
         require(msg.sender == creator || msg.sender == selectedContractor, "Unauthorized");
         require(!disputeActive, "Dispute already active");
         disputeActive = true;
-        state = ProjectState.DISPUTED;
+        
+        if (state != ProjectState.COMPLETED) {
+            escrowLedger.freeze();
+            state = ProjectState.DISPUTED;
+        }
+        
         emit DisputeRaised(msg.sender, reason);
     }
 
     function executeMediationRuling(MediationRuling calldata ruling) external onlyMediationKey nonReentrant whenNotPaused {
         require(state == ProjectState.DISPUTED, "Not disputed");
-        if (ruling.contractorAmount > 0) IERC20(escrowToken).safeTransfer(ruling.contractor, ruling.contractorAmount);
-        if (ruling.funderRefund > 0) IERC20(escrowToken).safeTransfer(ruling.funder, ruling.funderRefund);
+        
+        if (escrowLedger.frozen) {
+            escrowLedger.unfreeze();
+        }
+        
+        uint256 available = escrowLedger.remainingBalance();
+        require(ruling.contractorAmount + ruling.funderRefund <= available, "Exceeds balance");
+
+        if (ruling.contractorAmount > 0) {
+            IERC20(escrowToken).safeTransfer(ruling.contractor, ruling.contractorAmount);
+            escrowLedger.totalReleased += ruling.contractorAmount;
+        }
+        if (ruling.funderRefund > 0) {
+            IERC20(escrowToken).safeTransfer(ruling.funder, ruling.funderRefund);
+            escrowLedger.totalReleased += ruling.funderRefund;
+        }
+
         state = ProjectState.COMPLETED;
         emit MediationRulingExecuted(ruling);
     }
@@ -176,14 +196,20 @@ contract BountyContract is IBountyContract, ReentrancyGuard {
     // ─── Internal ─────────────────────────────────────────────────────────────
 
     function _releaseMilestone(uint8 milestoneIndex) internal nonReentrant {
-        milestones[milestoneIndex].state = MilestoneState.PAID;
+        bool allPaid = milestones.completeMilestone(milestoneIndex);
         uint256 payment = milestones[milestoneIndex].value;
-        IERC20(escrowToken).safeTransfer(selectedContractor, payment);
+        
+        if (payment > 0) {
+            escrowLedger.releaseMilestone(milestoneIndex, selectedContractor, payment, escrowToken);
+        }
         emit MilestoneApproved(milestoneIndex, payment);
+        
         currentMilestoneIndex++;
-        if (currentMilestoneIndex >= milestones.length) {
+        if (allPaid) {
             state = ProjectState.COMPLETED;
             emit BountyCompleted(selectedContractor, totalEscrowRequired);
+        } else {
+            state = ProjectState.ACTIVE;
         }
     }
 
