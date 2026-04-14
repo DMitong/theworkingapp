@@ -29,9 +29,31 @@ This sheet tracks the required configuration and "real-world" information needed
 ## 4. Pending Implementation Wiring
 | Item | Description | Status | File |
 |---|---|---|---|
-| `BlockchainService.init()` | Initialize the static ethers provider and wallet. | ❌ WIRING TODO | `backend/src/index.ts` |
-| `listenToBounty()` | Add event listener for BountyContract events. | ❌ WIRING TODO | `backend/src/services/blockchain/eventListener.ts` |
-| `reattachActiveBounties()`| Re-attach listeners for active bounties on startup. | ❌ WIRING TODO | `backend/src/services/blockchain/eventListener.ts` |
+| `BlockchainService.init()` | Initialize the static ethers provider and wallet. | ✅ DONE | `backend/src/index.ts` |
+| `listenToBounty()` | Add event listener for BountyContract events. | ✅ DONE | `backend/src/services/blockchain/eventListener.ts` |
+| `reattachActiveBounties()`| Re-attach listeners for active bounties on startup. | ✅ DONE | `backend/src/services/blockchain/eventListener.ts` |
+
+## 5. Deployment & Startup Sequence (Run these in order)
+Once Docker is running and Postgres is accessible:
+
+1. **Start Infrastructure:**
+   ```bash
+   docker-compose -f infra/docker/docker-compose.yml up -d
+   ```
+2. **Initialize Database (from `backend/`):**
+   ```bash
+   npx prisma migrate dev --name init
+   npx prisma generate
+   ```
+3. **Deploy Contracts (from `contracts/`):**
+   ```bash
+   forge script script/Deploy.s.sol --rpc-url <YOUR_RPC_URL> --broadcast
+   ```
+4. **Update `.env`:** Copy the resulting addresses into `backend/.env`.
+5. **Start API (from `backend/`):**
+   ```bash
+   npm run dev
+   ```
 
 ---
 **Last Updated:** Tuesday, April 14, 2026
