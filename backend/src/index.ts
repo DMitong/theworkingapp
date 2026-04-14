@@ -23,6 +23,7 @@ import nftRoutes from './routes/nft';
 // Services
 import { BlockchainService } from './services/blockchain/BlockchainService';
 import { BlockchainEventListener } from './services/blockchain/eventListener';
+import { NotificationService } from './services/notification/NotificationService';
 
 const app = express();
 const httpServer = createServer(app);
@@ -83,6 +84,7 @@ httpServer.listen(PORT, async () => {
   // Start blockchain services
   try {
     BlockchainService.init();
+    NotificationService.init();
     await BlockchainEventListener.start();
     logger.info('Blockchain services initialized');
   } catch (err) {
