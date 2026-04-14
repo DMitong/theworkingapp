@@ -21,6 +21,7 @@ import escrowRoutes from './routes/escrow';
 import nftRoutes from './routes/nft';
 
 // Services
+import { BlockchainService } from './services/blockchain/BlockchainService';
 import { BlockchainEventListener } from './services/blockchain/eventListener';
 
 const app = express();
@@ -79,12 +80,13 @@ const PORT = env.PORT;
 httpServer.listen(PORT, async () => {
   logger.info(`The Working App API running on port ${PORT} [${env.NODE_ENV}]`);
 
-  // Start listening for on-chain events
+  // Start blockchain services
   try {
+    BlockchainService.init();
     await BlockchainEventListener.start();
-    logger.info('Blockchain event listener started');
+    logger.info('Blockchain services initialized');
   } catch (err) {
-    logger.error('Failed to start event listener', err);
+    logger.error('Failed to initialize blockchain services', err);
   }
 });
 

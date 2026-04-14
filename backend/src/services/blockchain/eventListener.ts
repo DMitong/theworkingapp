@@ -6,6 +6,7 @@ import { BlockchainService } from './BlockchainService';
 
 import PlatformFactoryABI from '../../abis/PlatformFactory.json';
 import ProjectContractABI from '../../abis/ProjectContract.json';
+import BountyContractABI from '../../abis/BountyContract.json';
 
 // Map on-chain uint8 state to Prisma enum
 const PROJECT_STATE_MAP: Record<number, string> = {
@@ -48,6 +49,7 @@ export class BlockchainEventListener {
 
     await this.listenToFactory();
     await this.reattachActiveProjects();
+    await this.reattachActiveBounties();
     logger.info('Event listener active on factory:', env.PLATFORM_FACTORY_ADDRESS);
   }
 
@@ -130,15 +132,37 @@ export class BlockchainEventListener {
           await this.listenToProject(project.contractAddress, project.id, project.communityId);
         }
       }
+logger.info(`Re-attached event listeners for ${activeProjects.length} active projects`);
+} catch (error) {
+logger.error('Failed to re-attach active project listeners', { error });
+}
+}
 
-      logger.info(`Re-attached event listeners for ${activeProjects.length} active projects`);
-    } catch (error) {
-      logger.error('Failed to re-attach active project listeners', { error });
-    }
+private static async reattachActiveBounties() {
+try {
+const activeBounties = await prisma.bounty.findMany({
+  where: {
+    state: { notIn: ['COMPLETED', 'CLOSED', 'EXPIRED'] },
+    contractAddress: { not: null },
+  },
+  select: { id: true, contractAddress: true },
+});
+
+for (const bounty of activeBounties) {
+  if (bounty.contractAddress) {
+    await this.listenToBounty(bounty.contractAddress, bounty.id);
   }
+}
 
-  // ── Project Events ──────────────────────────────────────────────
+logger.info(`Re-attached event listeners for ${activeBounties.length} active bounties`);
+} catch (error) {
+logger.error('Failed to re-attach active bounty listeners', { error });
+}
+}
 
+// ── Project Events ──────────────────────────────────────────────
+
+...
   static async listenToProject(
     projectContractAddress: string,
     projectId: string,
@@ -282,5 +306,79 @@ export class BlockchainEventListener {
     });
 
     logger.info(`Listening to project events: ${projectContractAddress} (${projectId})`);
+  }
+
+  static async listenToBounty(
+    bountyContractAddress: string,
+    bountyId: string,
+  ) {
+    const contract = new ethers.Contract(
+      bountyContractAddress,
+      BountyContractABI.abi,
+      this.provider,
+    );
+    const io = this.getIO();
+
+    contract.on('StateTransition', async (_from: number, to: number) => {
+      const newState = PROJECT_STATE_MAP[Number(to)];
+      logger.info(`Bounty ${bountyId} state -> ${newState}`);
+
+      try {
+        await prisma.bounty.update({
+          where: { id: bountyId },
+          data: { state: newState as any },
+        });
+      } catch (error) {
+        logger.error('Failed to update bounty state in DB', { bountyId, error });
+      }
+
+      io.to(`bounty:${bountyId}`).emit('bounty:state', { bountyId, state: newState });
+    });
+
+    contract.on('BidSelected', async (contractor: string) => {
+      logger.info(`Bounty ${bountyId} awarded to ${contractor}`);
+
+      try {
+        await prisma.bounty.update({
+          where: { id: bountyId },
+          data: {
+            selectedContractorAddress: contractor,
+            state: 'AWARDED',
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to update awarded contractor for bounty', { bountyId, error });
+      }
+
+      io.to(`bounty:${bountyId}`).emit('bounty:awarded', { bountyId, contractor });
+    });
+
+    contract.on('MilestonePaid', async (milestoneIndex: number, contractor: string, amount: bigint) => {
+      const idx = Number(milestoneIndex);
+      logger.info(`Bounty Milestone ${idx} paid: ${amount} to ${contractor}`);
+
+      try {
+        const milestone = await prisma.milestone.findFirst({
+          where: { bountyId, index: idx },
+        });
+
+        if (milestone) {
+          await prisma.milestone.update({
+            where: { id: milestone.id },
+            data: { state: 'PAID', paidAt: new Date() },
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to update bounty milestone state', { bountyId, milestoneIndex: idx, error });
+      }
+
+      io.to(`bounty:${bountyId}`).emit('bounty:milestone-paid', {
+        bountyId,
+        milestoneIndex: idx,
+        amount: amount.toString(),
+      });
+    });
+
+    logger.info(`Listening to bounty events: ${bountyContractAddress} (${bountyId})`);
   }
 }
